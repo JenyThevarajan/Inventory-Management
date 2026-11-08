@@ -32,6 +32,10 @@ docker compose up --build
 
 Open http://localhost:8501. To use PostgreSQL without Docker, set `DATABASE_URL` to a SQLAlchemy URL such as `postgresql+psycopg://user:password@host:5432/inventory` before starting the API.
 
+## Deploy the Streamlit UI
+
+Deploy `streamlit_app.py` from this repository on Streamlit Community Cloud. The UI connects directly to the configured database, so it does not require a separately hosted FastAPI process. Add `DATABASE_URL` under the app's Streamlit secrets to use a managed PostgreSQL database (use a provider connection string compatible with `postgresql+psycopg://...`). Without a secret, it uses a local SQLite file for a quick demo; hosted local files may not persist across app restarts. The FastAPI service remains available for API integrations and can be deployed separately.
+
 ## Included
 
 - Inventory catalog with search and filters by asset type and status

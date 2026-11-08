@@ -1,9 +1,11 @@
-import os
 import pandas as pd
-import requests
 import streamlit as st
+from sqlalchemy import func, or_
+from app.database import SessionLocal
+from app.models import Activity, Asset
+from app.seed import initialize_inventory
 
-API = os.getenv("API_URL", "http://localhost:8000")
+initialize_inventory()
 st.set_page_config(page_title="AI & Data Inventory", page_icon="◈", layout="wide")
 st.markdown("""<style>
 .stApp{background:#f5f7fb}.block-container{padding-top:2rem;max-width:1400px}
@@ -12,19 +14,17 @@ st.markdown("""<style>
 st.title("◈  AI & Data Inventory")
 st.caption("A shared catalog for datasets, models, code, and the tools that power your team.")
 
-try:
-    stats = requests.get(f"{API}/stats", timeout=3).json()
-    assets = requests.get(f"{API}/assets", timeout=3).json()
-    activity = requests.get(f"{API}/activity", timeout=3).json()
-except requests.RequestException:
-    st.error("Can't reach the API. Start it with `uvicorn app.main:app --reload`.")
-    st.stop()
+with SessionLocal() as db:
+    total = db.query(func.count(Asset.id)).scalar() or 0
+    by_type = dict(db.query(Asset.asset_type, func.count(Asset.id)).group_by(Asset.asset_type).all())
+    by_status = dict(db.query(Asset.status, func.count(Asset.id)).group_by(Asset.status).all())
+    recent_activity = db.query(Activity).order_by(Activity.created_at.desc()).limit(20).all()
 
 c1,c2,c3,c4=st.columns(4)
-c1.metric("Total assets", stats["total"])
-c2.metric("Datasets", stats["by_type"].get("Dataset",0))
-c3.metric("Models", stats["by_type"].get("Model",0))
-c4.metric("Needs review", stats["by_status"].get("Needs Review",0))
+c1.metric("Total assets", total)
+c2.metric("Datasets", by_type.get("Dataset",0))
+c3.metric("Models", by_type.get("Model",0))
+c4.metric("Needs review", by_status.get("Needs Review",0))
 
 with st.sidebar:
     st.header("Find assets")
@@ -54,15 +54,25 @@ if st.session_state.get("show_form"):
                 if not name.strip(): 
                     st.error("Asset name is required.")
                 else:
-                    response=requests.post(f"{API}/assets",json={"name":name,"asset_type":typ,"description":desc,"owner":owner,"team":team,"status":status,"version":version,"license":license,"location":location,"tags":tags},timeout=5)
-                    if response.ok: 
-                        st.success("Asset added.")
-                        st.session_state.show_form=False
-                        st.rerun()
-                    else: 
-                        st.error(response.text)
+                    with SessionLocal() as db:
+                        asset=Asset(name=name.strip(),asset_type=typ,description=desc,owner=owner,team=team,status=status,version=version,license=license,location=location,tags=tags)
+                        db.add(asset)
+                        db.flush()
+                        db.add(Activity(asset_id=asset.id,action="Created",detail=asset.name))
+                        db.commit()
+                    st.success("Asset added.")
+                    st.session_state.show_form=False
+                    st.rerun()
 
-filtered=requests.get(f"{API}/assets",params={"q":search,"asset_type":type_filter,"status":status_filter},timeout=5).json()
+with SessionLocal() as db:
+    query=db.query(Asset)
+    if search.strip():
+        term=f"%{search.strip()}%"
+        query=query.filter(or_(Asset.name.ilike(term),Asset.description.ilike(term),Asset.tags.ilike(term),Asset.owner.ilike(term)))
+    if type_filter!="All": query=query.filter(Asset.asset_type==type_filter)
+    if status_filter!="All": query=query.filter(Asset.status==status_filter)
+    rows=query.order_by(Asset.updated_at.desc()).all()
+    filtered=[{"id":x.id,"name":x.name,"asset_type":x.asset_type,"team":x.team,"owner":x.owner,"status":x.status,"version":x.version,"license":x.license,"tags":x.tags,"description":x.description,"location":x.location} for x in rows]
 left,right=st.columns([2,1],gap="large")
 with left:
     st.subheader("Asset catalog")
@@ -78,17 +88,21 @@ with left:
             if item.get("location"): 
                 st.markdown(f"[Open asset location]({item['location']})")
             if st.button("Delete selected asset", key=f"delete-{item['id']}"):
-                requests.delete(f"{API}/assets/{item['id']}",timeout=5)
+                with SessionLocal() as db:
+                    db.add(Activity(asset_id=item["id"],action="Deleted",detail=item["name"]))
+                    asset=db.get(Asset,item["id"])
+                    if asset: db.delete(asset)
+                    db.commit()
                 st.rerun()
     else: 
         st.info("No assets match these filters. Add your first asset from the sidebar.")
 with right:
     st.subheader("By type")
-    if stats["by_type"]: 
-        st.bar_chart(pd.Series(stats["by_type"],name="Assets"))
+    if by_type: 
+        st.bar_chart(pd.Series(by_type,name="Assets"))
     st.subheader("Recent activity")
-    if activity:
-        for event in activity[:8]: 
-            st.markdown(f"**{event['action']}** · {event['detail']}")
+    if recent_activity:
+        for event in recent_activity[:8]: 
+            st.markdown(f"**{event.action}** · {event.detail}")
     else: 
         st.caption("Activity will appear as your team adds assets.")
